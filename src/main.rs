@@ -1,49 +1,62 @@
 use mobius::*;
-use rayon::ThreadPoolBuilder;
 
 type Model = u64;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 enum Event {
     Increment,
     Decrement,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 enum Effect {
     PrintOut(&'static str),
     PrintError(&'static str),
 }
 
-fn main() {
-    let init_fn = Box::new(|m: &Model| First::<Model, Effect>::from(0));
-    let update_fn = Box::new(|m: &Model, e: Event| {
-        dbg!(m, &e);
-        match e {
-            Event::Increment => Next::from(m + 1),
+struct Logic;
+
+impl Logic {
+    fn init(model: &Model) -> First<Model, Effect> {
+        dbg!(model);
+        First::from(1)
+    }
+
+    fn update(model: &Model, event: Event) -> Next<Model, Effect> {
+        match event {
+            Event::Increment => Next::from(model + 1),
             Event::Decrement => {
-                if *m == 0 {
-                    Next::dispatch(vec![Effect::PrintError("negative")])
+                if *model == 0 {
+                    Next::dispatch(Effect::PrintError("model cannot go negative"))
                 } else {
-                    Next::from(m - 1)
+                    Next::from(model - 1)
                 }
             }
         }
-    });
+    }
 
-    let (fsender, freceiver) = crossbeam_channel::unbounded();
-    let effecthandler = Box::new(move |ereceiver| fsender.clone());
+    fn handle(__: &Model, effect: Effect) -> Vec<Event> {
+        match effect {
+            Effect::PrintOut(s) => println!("{}", s),
+            Effect::PrintError(s) => eprintln!("{}", s),
+        }
+        vec![]
+    }
 
-    let (esender, ereceiver) = crossbeam_channel::unbounded();
-    let eventsource = Box::new(move |freceiver| esender.clone());
+    fn observe(model: &Model) {
+        println!("observe: {:#?}", model);
+    }
+}
 
-    let threadpool = ThreadPoolBuilder::default().build().unwrap();
+fn main() {
+    let mut l = LoopBuilder::new(Logic::update, Logic::handle)
+        .observe(Logic::observe)
+        .start(0);
 
-    let store = Store::new(0, init_fn, update_fn);
-    let mut lp = Loop::new(store, effecthandler, eventsource, threadpool);
+    l.dispatch(Event::Increment).dispatch(Event::Increment);
+    l.dispatch(Event::Decrement)
+        .dispatch(Event::Decrement)
+        .dispatch(Event::Decrement);
 
-    lp.dispatch(Event::Increment);
-    lp.dispatch(Event::Decrement);
-    lp.dispatch(Event::Decrement);
-    lp.dispatch(Event::Decrement);
+    l.run();
 }

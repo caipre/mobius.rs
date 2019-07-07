@@ -1,134 +1,214 @@
-use crossbeam_channel::{Receiver, Sender};
-use rayon::{ThreadPool, ThreadPoolBuilder};
+use std::collections::VecDeque;
+use std::iter::FromIterator;
+use std::marker::PhantomData;
 
-/// A function for initializing a loop from a given model.
-type InitFn<M, F> = Box<dyn Fn(&M) -> First<M, F>>;
-
-/// A function that drives the loop forward with a new model and effects.
-type UpdateFn<M, E, F> = Box<dyn Fn(&M, E) -> Next<M, F>>;
-
-/// Responsible for holding and updating the model.
-pub struct Store<M, E, F> {
-    model: M,
-    init_fn: InitFn<M, F>,
-    update_fn: UpdateFn<M, E, F>,
-}
-
-impl<M, E, F> Store<M, E, F> {
-    pub fn new(model: M, init_fn: InitFn<M, F>, update_fn: UpdateFn<M, E, F>) -> Self {
-        Store {
-            model,
-            init_fn,
-            update_fn,
-        }
-    }
-
-    fn init(&mut self) -> First<&M, F> {
-        let first = (self.init_fn)(&self.model);
-        self.model = first.model;
-        First::from(&self.model)
-    }
-
-    fn update(&mut self, event: E) -> Vec<F> {
-        let next = (self.update_fn)(&self.model, event);
-        if let Some(model) = next.model {
-            self.model = model;
-        }
-        next.effects
-    }
-}
-
-/// Represents the initial state of a mobius loop.
+/// Represents the first state of a mobius loop.
 pub struct First<M, F> {
-    pub model: M,
-    pub effects: Vec<F>,
+    model: M,
+    effects: Vec<F>,
 }
 
-impl<M, F> First<M, F> {
-    pub fn of(model: M, effects: Vec<F>) -> First<M, F> {
+impl<M, F> First<M, F>
+where
+    F: Clone,
+{
+    pub fn first(model: M, effects: &[F]) -> First<M, F> {
+        let effects = effects.to_vec();
         First { model, effects }
     }
+}
 
-    pub fn from(model: M) -> First<M, F> {
-        First {
-            model,
-            effects: vec![],
-        }
+impl<M, F> From<M> for First<M, F> {
+    fn from(model: M) -> Self {
+        let effects = vec![];
+        First { model, effects }
     }
 }
 
+///// Represents the desired next state for a mobius loop.
 pub struct Next<M, F> {
     model: Option<M>,
     effects: Vec<F>,
 }
 
-impl<M, F> Next<M, F> {
-    pub fn of(model: M, effects: Vec<F>) -> Next<M, F> {
-        Next {
-            model: Some(model),
-            effects,
-        }
+impl<M, F> Next<M, F>
+where
+    F: Clone,
+{
+    pub fn next(model: M, effects: &[F]) -> Self {
+        let model = Some(model);
+        let effects = effects.to_vec();
+        Next { model, effects }
     }
 
-    pub fn from(model: M) -> Next<M, F> {
-        Next {
-            model: Some(model),
-            effects: vec![],
-        }
+    pub fn dispatch(effect: F) -> Self {
+        let model = None;
+        let effects = vec![effect];
+        Next { model, effects }
     }
 
-    pub fn dispatch(effects: Vec<F>) -> Next<M, F> {
-        Next {
-            model: None,
-            effects,
-        }
+    pub fn dispatch_vec(effects: Vec<F>) -> Self {
+        let model = None;
+        let effects = effects.to_vec();
+        Next { model, effects }
     }
 
-    pub fn pass() -> Next<M, F> {
-        Next {
-            model: None,
-            effects: vec![],
-        }
+    pub fn no_change() -> Self {
+        let model = None;
+        let effects = vec![];
+        Next { model, effects }
     }
 }
 
-/// A function to connect to a loop.
-type Connectable<I, O> = Box<dyn Fn(Receiver<O>) -> Sender<I>>;
-
-pub struct Loop<M, E, F> {
-    store: Store<M, E, F>,
-    effecthandler: Connectable<F, E>,
-    eventsource: Connectable<M, E>,
-    threadpool: ThreadPool,
-    sender: Sender<F>,
-    receiver: Receiver<E>,
+impl<M, F> From<M> for Next<M, F> {
+    fn from(model: M) -> Self {
+        let model = Some(model);
+        let effects = vec![];
+        Next { model, effects }
+    }
 }
 
-impl<M, E, F> Loop<M, E, F> {
-    pub fn new(
-        store: Store<M, E, F>,
-        effecthandler: Connectable<F, E>,
-        eventsource: Connectable<M, E>,
-        threadpool: ThreadPool,
-    ) -> Self {
-        let (esender, ereceiver) = crossbeam_channel::unbounded();
-        let (fsender, freceiver) = crossbeam_channel::unbounded();
+pub struct LoopBuilder<M, E, F, U, H, O>
+where
+    //    I: Fn(&M) -> First<M, F>,
+    U: Fn(&M, E) -> Next<M, F>,
+    H: Fn(&M, F) -> Vec<E>,
+    //    S: Fn(&M) -> Vec<E>,
+    O: Fn(&M),
+{
+    model: PhantomData<M>,
+    //    init_fn: Option<Box<I>>,
+    update_fn: U,
+    handle_fn: H,
+    //    source_fn: Option<Box<S>>,
+    observe_fn: Option<Box<O>>,
+    event: PhantomData<E>,
+    effect: PhantomData<F>,
+}
+
+impl<M, E, F, U, H, O> LoopBuilder<M, E, F, U, H, O>
+where
+    //    I: Fn(&M) -> First<M, F>,
+    U: Fn(&M, E) -> Next<M, F>,
+    H: Fn(&M, F) -> Vec<E>,
+    //    S: Fn(&M) -> Vec<E>,
+    O: Fn(&M),
+{
+    pub fn new(update_fn: U, handle_fn: H) -> Self {
+        LoopBuilder {
+            model: PhantomData,
+            event: PhantomData,
+            effect: PhantomData,
+            //            init_fn: None,
+            update_fn,
+            handle_fn,
+            //            source_fn: None,
+            observe_fn: None,
+        }
+    }
+
+    //    pub fn init(&mut self, func: I) -> &mut Self {
+    //        self.init_fn = Some(Box::new(func));
+    //        self
+    //    }
+
+    //    pub fn source(&mut self, func: S) -> &mut Self {
+    //        self.source_fn = Some(Box::new(func));
+    //        self
+    //    }
+
+    pub fn observe(mut self, func: O) -> Self {
+        self.observe_fn = Some(Box::new(func));
+        self
+    }
+
+    pub fn start(self, model: M) -> Loop<M, E, F, U, H, O> {
+        Loop::new(model, self.update_fn, self.handle_fn, self.observe_fn)
+    }
+}
+
+enum Task<E, F> {
+    Event(E),
+    Effect(F),
+}
+
+pub struct Loop<M, E, F, U, H, O>
+where
+    //    I: Fn(&M) -> First<M, F>,
+    U: Fn(&M, E) -> Next<M, F>,
+    H: Fn(&M, F) -> Vec<E>,
+    //    S: Fn(&M) -> Vec<E>,
+    O: Fn(&M),
+{
+    model: M,
+    taskq: VecDeque<Task<E, F>>,
+    //    init_fn: Option<Box<I>>,
+    update_fn: U,
+    handle_fn: H,
+    //    source_fn: Option<Box<S>>,
+    observe_fn: Option<Box<O>>,
+}
+impl<M, E, F, U, H, O> Loop<M, E, F, U, H, O>
+where
+    //    I: Fn(&M) -> First<M, F>,
+    U: Fn(&M, E) -> Next<M, F>,
+    H: Fn(&M, F) -> Vec<E>,
+    //    S: Fn(&M) -> Vec<E>,
+    O: Fn(&M),
+{
+    pub fn dispatch(&mut self, event: E) -> &mut Self {
+        self.taskq.push_back(Task::Event(event));
+        self
+    }
+
+    //
+
+    fn new(model: M, update_fn: U, handle_fn: H, observe_fn: Option<Box<O>>) -> Self {
         Loop {
-            store,
-            effecthandler,
-            eventsource,
-            threadpool,
-            sender: fsender,
-            receiver: ereceiver,
+            model,
+            taskq: VecDeque::new(),
+            //            init_fn: self.init_fn,
+            update_fn,
+            handle_fn,
+            //            source_fn: self.source_fn,
+            observe_fn,
         }
     }
 
-    pub fn start_from(&mut self, model: M) {
-        self.store.model = model;
+    pub fn run(&mut self) -> &mut Self {
+        loop {
+            match self.taskq.pop_front() {
+                Some(task) => {
+                    let tasks = self.handle(task);
+                    self.taskq.append(&mut tasks.into());
+                }
+                None => break,
+            }
+        }
+        self
     }
 
-    pub fn dispatch(&mut self, event: E) {
-        let fs = self.store.update(event);
-        (self.effecthandler)(self.receiver.clone());
+    fn handle(&mut self, task: Task<E, F>) -> Vec<Task<E, F>> {
+        match task {
+            Task::Event(event) => {
+                let effects = self.update(event);
+                effects.into_iter().map(|e| Task::Effect(e)).collect()
+            }
+            Task::Effect(effect) => {
+                let events = (self.handle_fn)(&self.model, effect);
+                events.into_iter().map(|e| Task::Event(e)).collect()
+            }
+        }
+    }
+
+    fn update(&mut self, event: E) -> Vec<F> {
+        let next = (self.update_fn)(&self.model, event);
+        if let Some(next_model) = next.model {
+            self.model = next_model;
+            if let Some(ref func) = self.observe_fn {
+                (func)(&self.model);
+            }
+        }
+        next.effects
     }
 }
