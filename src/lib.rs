@@ -12,8 +12,7 @@ impl<M, F> First<M, F>
 where
     F: Clone,
 {
-    pub fn first(model: M, effects: &[F]) -> First<M, F> {
-        let effects = effects.to_vec();
+    pub fn first(model: M, effects: Vec<F>) -> First<M, F> {
         First { model, effects }
     }
 }
@@ -35,9 +34,8 @@ impl<M, F> Next<M, F>
 where
     F: Clone,
 {
-    pub fn next(model: M, effects: &[F]) -> Self {
+    pub fn next(model: M, effects: Vec<F>) -> Self {
         let model = Some(model);
-        let effects = effects.to_vec();
         Next { model, effects }
     }
 
@@ -49,7 +47,6 @@ where
 
     pub fn dispatch_vec(effects: Vec<F>) -> Self {
         let model = None;
-        let effects = effects.to_vec();
         Next { model, effects }
     }
 
@@ -68,55 +65,118 @@ impl<M, F> From<M> for Next<M, F> {
     }
 }
 
-pub struct LoopBuilder<M, E, F, U, H, O> {
+pub struct LoopBuilder<M, E, F, I, U, H, S, O> {
     model: PhantomData<M>,
     event: PhantomData<E>,
     effect: PhantomData<F>,
-    //    init_fn: Option<Box<I>>,
+    init_fn: Option<I>,
     update_fn: U,
     handle_fn: H,
-    //    source_fn: Option<Box<S>>,
-    observe_fn: Option<Box<O>>,
+    source_fn: Option<S>,
+    observe_fn: Option<O>,
 }
 
-impl<M, E, F, U, H, O> LoopBuilder<M, E, F, U, H, O>
+type InitFn<M, F> = fn(&M) -> First<M, F>;
+type SourceFn<M, E> = fn(&M) -> Vec<E>;
+type ObserveFn<M> = fn(&M);
+
+impl<M, E, F, U, H> LoopBuilder<M, E, F, InitFn<M, F>, U, H, SourceFn<M, E>, ObserveFn<M>>
 where
-    //    I: Fn(&M) -> First<M, F>,
     U: Fn(&M, E) -> Next<M, F>,
     H: Fn(&M, F) -> Vec<E>,
-    //    S: Fn(&M) -> Vec<E>,
-    O: Fn(&M),
 {
     pub fn new(update_fn: U, handle_fn: H) -> Self {
         LoopBuilder {
             model: PhantomData,
             event: PhantomData,
             effect: PhantomData,
-            //            init_fn: None,
+            init_fn: None,
             update_fn,
             handle_fn,
-            //            source_fn: None,
+            source_fn: None,
             observe_fn: None,
         }
     }
+}
 
-    //    pub fn init(&mut self, func: I) -> &mut Self {
-    //        self.init_fn = Some(Box::new(func));
-    //        self
-    //    }
-
-    //    pub fn source(&mut self, func: S) -> &mut Self {
-    //        self.source_fn = Some(Box::new(func));
-    //        self
-    //    }
-
-    pub fn observe(mut self, func: O) -> Self {
-        self.observe_fn = Some(Box::new(func));
-        self
+impl<M, E, F, I, U, H, S, O> LoopBuilder<M, E, F, I, U, H, S, O>
+where
+    I: Fn(&M) -> First<M, F>,
+{
+    /// Return a new Builder configured with the supplied init function while
+    /// retaining the same values for all other fields.
+    pub fn init<F0: Fn(&M) -> First<M, F>>(self, func: F0) -> LoopBuilder<M, E, F, F0, U, H, S, O> {
+        LoopBuilder {
+            model: self.model,
+            event: self.event,
+            effect: self.effect,
+            init_fn: Some(func),
+            update_fn: self.update_fn,
+            handle_fn: self.handle_fn,
+            source_fn: self.source_fn,
+            observe_fn: self.observe_fn,
+        }
     }
+}
 
-    pub fn start(self, model: M) -> SingleThreadedLoop<M, E, F, U, H, O> {
-        SingleThreadedLoop::new(model, self.update_fn, self.handle_fn, self.observe_fn)
+impl<M, E, F, I, U, H, S, O> LoopBuilder<M, E, F, I, U, H, S, O>
+where
+    S: Fn(&M) -> Vec<E>,
+{
+    /// Return a new Builder configured with the supplied source function while
+    /// retaining the same values for all other fields.
+    pub fn source<F0: Fn(&M) -> Vec<E>>(self, func: F0) -> LoopBuilder<M, E, F, I, U, H, F0, O> {
+        LoopBuilder {
+            model: self.model,
+            event: self.event,
+            effect: self.effect,
+            init_fn: self.init_fn,
+            update_fn: self.update_fn,
+            handle_fn: self.handle_fn,
+            source_fn: Some(func),
+            observe_fn: self.observe_fn,
+        }
+    }
+}
+
+impl<M, E, F, I, U, H, S, O> LoopBuilder<M, E, F, I, U, H, S, O>
+where
+    O: Fn(&M),
+{
+    /// Return a new Builder configured with the supplied observe function while
+    /// retaining the same values for all other fields.
+    pub fn observe<F0: Fn(&M)>(self, func: F0) -> LoopBuilder<M, E, F, I, U, H, S, F0> {
+        LoopBuilder {
+            model: self.model,
+            event: self.event,
+            effect: self.effect,
+            init_fn: self.init_fn,
+            update_fn: self.update_fn,
+            handle_fn: self.handle_fn,
+            source_fn: self.source_fn,
+            observe_fn: Some(func),
+        }
+    }
+}
+
+impl<M, E, F, I, U, H, S, O> LoopBuilder<M, E, F, I, U, H, S, O>
+where
+    I: Fn(&M) -> First<M, F>,
+    U: Fn(&M, E) -> Next<M, F>,
+    H: Fn(&M, F) -> Vec<E>,
+    S: Fn(&M) -> Vec<E>,
+    O: Fn(&M),
+{
+    pub fn start(self, model: M) -> SingleThreadedLoop<M, E, F, I, U, H, S, O> {
+        SingleThreadedLoop {
+            model: RefCell::new(model),
+            taskq: Cell::new(VecDeque::new()),
+            init_fn: self.init_fn,
+            update_fn: self.update_fn,
+            handle_fn: self.handle_fn,
+            source_fn: self.source_fn,
+            observe_fn: self.observe_fn,
+        }
     }
 }
 
@@ -130,22 +190,22 @@ pub trait Loop<M, E, F> {
     fn dispatch(&self, event: E) -> &Self;
 }
 
-pub struct SingleThreadedLoop<M, E, F, U, H, O> {
+pub struct SingleThreadedLoop<M, E, F, I, U, H, S, O> {
     model: RefCell<M>,
     taskq: Cell<VecDeque<Task<E, F>>>,
-    //    init_fn: Option<Box<I>>,
+    init_fn: Option<I>,
     update_fn: U,
     handle_fn: H,
-    //    source_fn: Option<Box<S>>,
-    observe_fn: Option<Box<O>>,
+    source_fn: Option<S>,
+    observe_fn: Option<O>,
 }
 
-impl<M, E, F, U, H, O> SingleThreadedLoop<M, E, F, U, H, O>
+impl<M, E, F, I, U, H, S, O> SingleThreadedLoop<M, E, F, I, U, H, S, O>
 where
-    //    I: Fn(&M) -> First<M, F>,
+    I: Fn(&M) -> First<M, F>,
     U: Fn(&M, E) -> Next<M, F>,
     H: Fn(&M, F) -> Vec<E>,
-    //    S: Fn(&M) -> Vec<E>,
+    S: Fn(&M) -> Vec<E>,
     O: Fn(&M),
 {
     pub fn dispatch(&self, event: E) -> &Self {
@@ -157,19 +217,8 @@ where
 
     //
 
-    fn new(model: M, update_fn: U, handle_fn: H, observe_fn: Option<Box<O>>) -> Self {
-        SingleThreadedLoop {
-            model: RefCell::new(model),
-            taskq: Cell::new(VecDeque::new()),
-            //            init_fn: self.init_fn,
-            update_fn,
-            handle_fn,
-            //            source_fn: self.source_fn,
-            observe_fn,
-        }
-    }
-
     pub fn run(&self) -> &Self {
+        self.init();
         loop {
             let mut taskq = self.taskq.take();
             match taskq.pop_front() {
@@ -182,6 +231,23 @@ where
             }
         }
         self
+    }
+
+    //
+
+    fn init(&self) {
+        if let Some(ref init_fn) = self.init_fn {
+            let first = (init_fn)(&self.model.borrow());
+            self.model.replace(first.model);
+            let tasks = first
+                .effects
+                .into_iter()
+                .map(|e| Task::Effect(e))
+                .collect::<Vec<_>>();
+            let mut taskq = self.taskq.take();
+            taskq.append(&mut tasks.into());
+            self.taskq.replace(taskq);
+        }
     }
 
     fn handle(&self, task: Task<E, F>) -> Vec<Task<E, F>> {
