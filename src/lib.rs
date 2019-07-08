@@ -1,5 +1,5 @@
+use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
-use std::iter::FromIterator;
 use std::marker::PhantomData;
 
 /// Represents the first state of a mobius loop.
@@ -68,22 +68,15 @@ impl<M, F> From<M> for Next<M, F> {
     }
 }
 
-pub struct LoopBuilder<M, E, F, U, H, O>
-where
-    //    I: Fn(&M) -> First<M, F>,
-    U: Fn(&M, E) -> Next<M, F>,
-    H: Fn(&M, F) -> Vec<E>,
-    //    S: Fn(&M) -> Vec<E>,
-    O: Fn(&M),
-{
+pub struct LoopBuilder<M, E, F, U, H, O> {
     model: PhantomData<M>,
+    event: PhantomData<E>,
+    effect: PhantomData<F>,
     //    init_fn: Option<Box<I>>,
     update_fn: U,
     handle_fn: H,
     //    source_fn: Option<Box<S>>,
     observe_fn: Option<Box<O>>,
-    event: PhantomData<E>,
-    effect: PhantomData<F>,
 }
 
 impl<M, E, F, U, H, O> LoopBuilder<M, E, F, U, H, O>
@@ -122,8 +115,8 @@ where
         self
     }
 
-    pub fn start(self, model: M) -> Loop<M, E, F, U, H, O> {
-        Loop::new(model, self.update_fn, self.handle_fn, self.observe_fn)
+    pub fn start(self, model: M) -> SingleThreadedLoop<M, E, F, U, H, O> {
+        SingleThreadedLoop::new(model, self.update_fn, self.handle_fn, self.observe_fn)
     }
 }
 
@@ -132,23 +125,22 @@ enum Task<E, F> {
     Effect(F),
 }
 
-pub struct Loop<M, E, F, U, H, O>
-where
-    //    I: Fn(&M) -> First<M, F>,
-    U: Fn(&M, E) -> Next<M, F>,
-    H: Fn(&M, F) -> Vec<E>,
-    //    S: Fn(&M) -> Vec<E>,
-    O: Fn(&M),
-{
-    model: M,
-    taskq: VecDeque<Task<E, F>>,
+pub trait Loop<M, E, F> {
+    fn current(&self) -> M;
+    fn dispatch(&self, event: E) -> &Self;
+}
+
+pub struct SingleThreadedLoop<M, E, F, U, H, O> {
+    model: RefCell<M>,
+    taskq: Cell<VecDeque<Task<E, F>>>,
     //    init_fn: Option<Box<I>>,
     update_fn: U,
     handle_fn: H,
     //    source_fn: Option<Box<S>>,
     observe_fn: Option<Box<O>>,
 }
-impl<M, E, F, U, H, O> Loop<M, E, F, U, H, O>
+
+impl<M, E, F, U, H, O> SingleThreadedLoop<M, E, F, U, H, O>
 where
     //    I: Fn(&M) -> First<M, F>,
     U: Fn(&M, E) -> Next<M, F>,
@@ -156,17 +148,19 @@ where
     //    S: Fn(&M) -> Vec<E>,
     O: Fn(&M),
 {
-    pub fn dispatch(&mut self, event: E) -> &mut Self {
-        self.taskq.push_back(Task::Event(event));
+    pub fn dispatch(&self, event: E) -> &Self {
+        let mut taskq = self.taskq.take();
+        taskq.push_back(Task::Event(event));
+        self.taskq.replace(taskq);
         self
     }
 
     //
 
     fn new(model: M, update_fn: U, handle_fn: H, observe_fn: Option<Box<O>>) -> Self {
-        Loop {
-            model,
-            taskq: VecDeque::new(),
+        SingleThreadedLoop {
+            model: RefCell::new(model),
+            taskq: Cell::new(VecDeque::new()),
             //            init_fn: self.init_fn,
             update_fn,
             handle_fn,
@@ -175,12 +169,14 @@ where
         }
     }
 
-    pub fn run(&mut self) -> &mut Self {
+    pub fn run(&self) -> &Self {
         loop {
-            match self.taskq.pop_front() {
+            let mut taskq = self.taskq.take();
+            match taskq.pop_front() {
                 Some(task) => {
                     let tasks = self.handle(task);
-                    self.taskq.append(&mut tasks.into());
+                    taskq.append(&mut tasks.into());
+                    self.taskq.replace(taskq);
                 }
                 None => break,
             }
@@ -188,25 +184,25 @@ where
         self
     }
 
-    fn handle(&mut self, task: Task<E, F>) -> Vec<Task<E, F>> {
+    fn handle(&self, task: Task<E, F>) -> Vec<Task<E, F>> {
         match task {
             Task::Event(event) => {
                 let effects = self.update(event);
                 effects.into_iter().map(|e| Task::Effect(e)).collect()
             }
             Task::Effect(effect) => {
-                let events = (self.handle_fn)(&self.model, effect);
+                let events = (self.handle_fn)(&self.model.borrow(), effect);
                 events.into_iter().map(|e| Task::Event(e)).collect()
             }
         }
     }
 
-    fn update(&mut self, event: E) -> Vec<F> {
-        let next = (self.update_fn)(&self.model, event);
+    fn update(&self, event: E) -> Vec<F> {
+        let next = (self.update_fn)(&self.model.borrow(), event);
         if let Some(next_model) = next.model {
-            self.model = next_model;
+            self.model.replace(next_model);
             if let Some(ref func) = self.observe_fn {
-                (func)(&self.model);
+                (func)(&self.model.borrow());
             }
         }
         next.effects

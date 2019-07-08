@@ -49,14 +49,15 @@ impl Logic {
 }
 
 fn main() {
-    let mut l = LoopBuilder::new(Logic::update, Logic::handle)
+    let loupe = LoopBuilder::new(Logic::update, Logic::handle)
         .observe(Logic::observe)
         .start(0);
 
-    l.dispatch(Event::Increment).dispatch(Event::Increment);
-    l.dispatch(Event::Decrement)
+    loupe.dispatch(Event::Increment).dispatch(Event::Increment);
+    loupe
+        .dispatch(Event::Decrement)
         .dispatch(Event::Decrement)
         .dispatch(Event::Decrement);
 
-    l.run();
+    loupe.run();
 }
