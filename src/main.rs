@@ -17,9 +17,9 @@ enum Effect {
 struct Logic;
 
 impl Logic {
-    fn init(model: &Model) -> First<Model, Effect> {
-        dbg!(model);
-        First::from(1)
+    fn init(__: &Model) -> First<Model, Effect> {
+        let v = vec![Effect::PrintOut("first")];
+        First::first(0, v)
     }
 
     fn update(model: &Model, event: Event) -> Next<Model, Effect> {
@@ -49,9 +49,10 @@ impl Logic {
 }
 
 fn main() {
-    let loupe = LoopBuilder::new(Logic::update, Logic::handle)
+    let loupe = Builder::new(Logic::update, Logic::handle)
+        .init(Logic::init)
         .observe(Logic::observe)
-        .start(0);
+        .start(1);
 
     loupe.dispatch(Event::Increment).dispatch(Event::Increment);
     loupe
